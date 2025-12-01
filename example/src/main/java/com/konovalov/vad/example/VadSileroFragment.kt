@@ -11,6 +11,8 @@ import android.widget.Spinner
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.konovalov.vad.example.player.AudioPlayer
+import com.konovalov.vad.example.player.PcmBuffer
 import com.konovalov.vad.example.recorder.VoiceRecorder
 import com.konovalov.vad.example.recorder.VoiceRecorder.AudioCallback
 import com.konovalov.vad.silero.Vad
@@ -27,8 +29,8 @@ class VadSileroFragment : Fragment(),
     View.OnClickListener,
     AdapterView.OnItemSelectedListener {
 
-    private val DEFAULT_SAMPLE_RATE = SampleRate.SAMPLE_RATE_8K
-    private val DEFAULT_FRAME_SIZE = FrameSize.FRAME_SIZE_256
+    private val DEFAULT_SAMPLE_RATE = SampleRate.SAMPLE_RATE_16K
+    private val DEFAULT_FRAME_SIZE = FrameSize.FRAME_SIZE_512
     private val DEFAULT_MODE = Mode.NORMAL
     private val DEFAULT_SILENCE_DURATION_MS = 300
     private val DEFAULT_SPEECH_DURATION_MS = 50
@@ -108,94 +110,132 @@ class VadSileroFragment : Fragment(),
         activateRecordingButtonWithPermissionCheck()
     }
 
+    private val audioPlayer: AudioPlayer = AudioPlayer()
+
+    private var triggered = false
+
+    private val pcmBuffer = PcmBuffer()
+
+    val preBuffer = ArrayDeque<ShortArray>()
+
+
     override fun onAudio(audioData: ShortArray) {
+
+        // ---- 1. pre-buffer（前滚 5 帧 = 100ms） ----
+        val copyFrame = audioData.copyOf()  // 必须深拷贝
+
+        // ---- 2. VAD = true（语音中）----
         if (vad.isSpeech(audioData)) {
-            requireActivity().runOnUiThread {
-                speechTextView.setText(R.string.speech_detected)
+            // --- Speech starts ---
+            if (!triggered) {
+                triggered = true
+
+                // 清空旧句子
+                pcmBuffer.clear()
+                // 把 pre-buffer 加进去
+                for (buf in preBuffer) {
+                    pcmBuffer.append(buf)
+                }
+                preBuffer.clear()
+                // 添加当前帧
+                pcmBuffer.append(copyFrame)
+            } else {
+                pcmBuffer.append(copyFrame)
             }
         } else {
-            requireActivity().runOnUiThread {
-                speechTextView.setText(R.string.noise_detected)
+            // ---- 3. VAD = false（检测到语音结束）----
+            if (triggered) {
+                triggered = false
+                pcmBuffer.append(copyFrame)
+                // 取出完整语音
+                val segment = pcmBuffer.getAndClear()
+                if (segment.isNotEmpty()) {
+                    audioPlayer.playNow(segment)
+                }
             }
+
+            if (preBuffer.size >= 5) preBuffer.removeFirst()
+            preBuffer.addLast(copyFrame)
         }
     }
 
-    private fun getSampleRates(): List<String> {
-        return SampleRate.values().map { it.name }.toList()
-    }
+        private fun getSampleRates(): List<String> {
+            return SampleRate.values().map { it.name }.toList()
+        }
 
-    private fun getFrameSizes(sampleRate: SampleRate): List<String> {
-        return vad.supportedParameters.get(sampleRate)?.map { it.name }?.toList() ?: emptyList()
-    }
+        private fun getFrameSizes(sampleRate: SampleRate): List<String> {
+            return vad.supportedParameters.get(sampleRate)?.map { it.name }?.toList() ?: emptyList()
+        }
 
-    private fun modes(): List<String> {
-        return Mode.values().map { it.name }.toList()
-    }
+        private fun modes(): List<String> {
+            return Mode.values().map { it.name }.toList()
+        }
 
-    private fun startRecording() {
-        isRecording = true
-        recorder.start(vad.sampleRate.value, vad.frameSize.value)
-        recordingButton.setImageResource(R.drawable.stop)
-    }
+        private fun startRecording() {
+            isRecording = true
+            recorder.start(vad.sampleRate.value, vad.frameSize.value)
+            recordingButton.setImageResource(R.drawable.stop)
+        }
 
-    private fun stopRecording() {
-        isRecording = false
-        recorder.stop()
-        recordingButton.setImageResource(R.drawable.red_dot)
-    }
+        private fun stopRecording() {
+            isRecording = false
+            recorder.stop()
+            recordingButton.setImageResource(R.drawable.red_dot)
+        }
 
-    override fun onClick(v: View) {
-        if (!isRecording) {
-            startRecording()
-        } else {
+        override fun onClick(v: View) {
+            if (!isRecording) {
+                startRecording()
+            } else {
+                stopRecording()
+            }
+        }
+
+        override fun onItemSelected(
+            adapterView: AdapterView<*>, view: View, position: Int, l: Long
+        ) {
             stopRecording()
-        }
-    }
 
-    override fun onItemSelected(adapterView: AdapterView<*>, view: View, position: Int, l: Long) {
-        stopRecording()
+            when (adapterView.tag.toString()) {
+                SPINNER_SAMPLE_RATE_TAG -> {
+                    vad.sampleRate =
+                        SampleRate.valueOf(sampleRateAdapter.getItem(position).toString())
 
-        when (adapterView.tag.toString()) {
-            SPINNER_SAMPLE_RATE_TAG -> {
-                vad.sampleRate = SampleRate.valueOf(sampleRateAdapter.getItem(position).toString())
+                    frameAdapter.clear()
+                    frameAdapter.addAll(getFrameSizes(vad.sampleRate))
+                    frameAdapter.notifyDataSetChanged()
+                    frameSpinner.setSelection(0)
 
-                frameAdapter.clear()
-                frameAdapter.addAll(getFrameSizes(vad.sampleRate))
-                frameAdapter.notifyDataSetChanged()
-                frameSpinner.setSelection(0)
+                    vad.frameSize = FrameSize.valueOf(frameAdapter.getItem(0).toString())
+                }
 
-                vad.frameSize = FrameSize.valueOf(frameAdapter.getItem(0).toString())
-            }
+                SPINNER_FRAME_SIZE_TAG -> {
+                    vad.frameSize = FrameSize.valueOf(frameAdapter.getItem(position).toString())
+                }
 
-            SPINNER_FRAME_SIZE_TAG -> {
-                vad.frameSize = FrameSize.valueOf(frameAdapter.getItem(position).toString())
-            }
-
-            SPINNER_MODE_TAG -> {
-                vad.mode = Mode.valueOf(modeAdapter.getItem(position).toString())
+                SPINNER_MODE_TAG -> {
+                    vad.mode = Mode.valueOf(modeAdapter.getItem(position).toString())
+                }
             }
         }
-    }
 
-    @NeedsPermission(Manifest.permission.RECORD_AUDIO)
-    fun activateRecordingButton() {
-        recordingButton.isEnabled = true
-    }
+        @NeedsPermission(Manifest.permission.RECORD_AUDIO)
+        fun activateRecordingButton() {
+            recordingButton.isEnabled = true
+        }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        onRequestPermissionsResult(requestCode, grantResults)
-    }
+        override fun onRequestPermissionsResult(
+            requestCode: Int, permissions: Array<String>, grantResults: IntArray
+        ) {
+            super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+            onRequestPermissionsResult(requestCode, grantResults)
+        }
 
-    override fun onNothingSelected(p0: AdapterView<*>?) {}
+        override fun onNothingSelected(p0: AdapterView<*>?) {}
 
-    override fun onDestroyView() {
-        super.onDestroyView()
-        recorder.stop()
-        vad.close()
+        override fun onDestroyView() {
+            super.onDestroyView()
+            recorder.stop()
+            vad.close()
+        }
     }
-}
