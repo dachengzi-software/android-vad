@@ -3,6 +3,7 @@ package com.konovalov.vad.example
 import android.Manifest
 import android.graphics.Color
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -26,6 +27,7 @@ import com.konovalov.vad.silero.config.Mode
 import com.konovalov.vad.silero.config.SampleRate
 import permissions.dispatcher.NeedsPermission
 import permissions.dispatcher.RuntimePermissions
+import java.util.ArrayDeque
 import kotlin.concurrent.Volatile
 
 
@@ -153,6 +155,7 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
                 // 清空旧句子
                 pcmBuffer.clear()
                 // 把 pre-buffer 加进去
+                Log.d(TAG, "preBuffer.size=${preBuffer.size}")
                 for (buf in preBuffer) {
                     pcmBuffer.append(buf)
                     updateWaveform(buf, Color.RED)
@@ -275,5 +278,9 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
         vad.close()
         triggered = false
         pauseDetection = false
+    }
+
+    companion object {
+        private const val TAG = "VadSileroFragment"
     }
 }
