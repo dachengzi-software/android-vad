@@ -146,7 +146,6 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
 
         // ---- 2. VAD = true（语音中）----
         if (vad.isSpeech(copyFrame)) {
-            updateWaveform(copyFrame, Color.GREEN)
             // --- Speech starts ---
             if (!triggered) {
                 triggered = true
@@ -156,13 +155,13 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
                 // 把 pre-buffer 加进去
                 for (buf in preBuffer) {
                     pcmBuffer.append(buf)
+                    updateWaveform(buf, Color.RED)
                 }
                 preBuffer.clear()
-                // 添加当前帧
-                pcmBuffer.append(copyFrame)
-            } else {
-                pcmBuffer.append(copyFrame)
             }
+            // 添加当前帧
+            pcmBuffer.append(copyFrame)
+            updateWaveform(copyFrame, Color.GREEN)
         } else {
             updateWaveform(copyFrame, Color.GRAY)
 
