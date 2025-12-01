@@ -131,20 +131,10 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
 
     val preBuffer = ArrayDeque<ShortArray>()
 
-    @Volatile
-    private var pauseDetection = false
-
-
     override fun onAudio(audioData: ShortArray) {
 
         // ---- 1. pre-buffer（前滚 5 帧 = 100ms） ----
         val copyFrame = audioData.copyOf()  // 必须深拷贝
-
-        // Skip detection during playback (recording continues normally)
-        if (pauseDetection) {
-            updateWaveform(copyFrame, Color.YELLOW)
-            return
-        }
 
         // ---- 2. VAD = true（语音中）----
         if (vad.isSpeech(copyFrame)) {
@@ -175,15 +165,7 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
                 // 取出完整语音
                 val segment = pcmBuffer.getAndClear()
                 if (segment.isNotEmpty()) {
-                    // Pause detection before playback
-                    pauseDetection = true
-                    EXECUTOR.submit {
-                        try {
-                            audioPlayer.playNow(segment)
-                        } finally {
-                            pauseDetection = false
-                        }
-                    }
+                    audioPlayer.playNow(segment)
                 }
             }
 
@@ -277,7 +259,6 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
         recorder.stop()
         vad.close()
         triggered = false
-        pauseDetection = false
     }
 
     companion object {
