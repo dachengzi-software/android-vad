@@ -11,6 +11,8 @@ import android.widget.Spinner
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.konovalov.vad.example.player.AudioPlayer
+import com.konovalov.vad.example.player.PcmBuffer
 import com.konovalov.vad.example.recorder.VoiceRecorder
 import com.konovalov.vad.example.recorder.VoiceRecorder.AudioCallback
 import com.konovalov.vad.webrtc.Vad
@@ -107,16 +109,51 @@ class VadWebRTCFragment : Fragment(),
         activateRecordingButtonWithPermissionCheck()
     }
 
+    private val audioPlayer: AudioPlayer = AudioPlayer()
+
+    private var triggered = false
+
+    private val pcmBuffer = PcmBuffer()
+
+    val preBuffer = ArrayDeque<ShortArray>()
 
     override fun onAudio(audioData: ShortArray) {
+
+        // ---- 1. pre-buffer（前滚 5 帧 = 100ms） ----
+        val copyFrame = audioData.copyOf()  // 必须深拷贝
+
+        // ---- 2. VAD = true（语音中）----
         if (vad.isSpeech(audioData)) {
-            requireActivity().runOnUiThread{
-                speechTextView.setText(R.string.speech_detected)
+            // --- Speech starts ---
+            if (!triggered) {
+                triggered = true
+
+                // 清空旧句子
+                pcmBuffer.clear()
+                // 把 pre-buffer 加进去
+                for (buf in preBuffer) {
+                    pcmBuffer.append(buf)
+                }
+                preBuffer.clear()
+                // 添加当前帧
+                pcmBuffer.append(copyFrame)
+            } else {
+                pcmBuffer.append(copyFrame)
             }
         } else {
-            requireActivity().runOnUiThread{
-                speechTextView.setText(R.string.noise_detected)
+            // ---- 3. VAD = false（检测到语音结束）----
+            if (triggered) {
+                triggered = false
+                pcmBuffer.append(copyFrame)
+                // 取出完整语音
+                val segment = pcmBuffer.getAndClear()
+                if (segment.isNotEmpty()) {
+                    audioPlayer.playNow(segment)
+                }
             }
+
+            if (preBuffer.size >= 5) preBuffer.removeFirst()
+            preBuffer.addLast(copyFrame)
         }
     }
 
