@@ -193,7 +193,7 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
     private fun updateWaveform(audioData: ShortArray, color: Int) {
         EXECUTOR.submit {
             val rms: Float = AudioUtils.calculateRMS(audioData)
-            waveformView.post { waveformView.addAmplitude(rms, color) }
+            waveformView.addAmplitude(rms, color)
         }
     }
 

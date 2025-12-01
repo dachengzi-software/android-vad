@@ -2,7 +2,6 @@ package com.konovalov.vad.example.wave;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.util.AttributeSet;
 import android.view.View;
@@ -26,19 +25,22 @@ public class WaveformView extends View {
 
     // 添加音量值 + 对应颜色
     public void addAmplitude(float value, int color) {
-        if (amplitudes.size() > getWidth()) {
-            amplitudes.remove(0);
-            colors.remove(0);
-        }
-        amplitudes.add(value);
-        colors.add(color);
-        invalidate();
+        post(() -> {
+            if (amplitudes.size() > getWidth()) {
+                amplitudes.remove(0);
+                colors.remove(0);
+            }
+            amplitudes.add(value);
+            colors.add(color);
+            invalidate();
+        });
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
 
+        float padding = 10f; // 上下留白，单位 px
         float centerY = getHeight() / 2f;
 
         // 方法B: 自适应缩放（根据最近 N 帧最大值）
@@ -46,7 +48,11 @@ public class WaveformView extends View {
         if (!amplitudes.isEmpty()) {
             maxRecent = Collections.max(amplitudes);
         }
-        float scale = (getHeight() / 2f) / (maxRecent + 1); // +1防止除零
+
+        // 计算可用高度
+        float drawableHeight = getHeight() - 2 * padding;
+        float scale = (drawableHeight / 2f) / (maxRecent + 1); // +1防止除零
+
 
         // ---------- 2. 绘制波形 ----------
         for (int i = 0; i < amplitudes.size(); i++) {
@@ -54,10 +60,11 @@ public class WaveformView extends View {
             float y = amplitudes.get(i) * scale;
 
             // 限制 y 最大值，防止超出 View
-            if (y > getHeight() / 2f) y = getHeight() / 2f;
+            if (y > drawableHeight / 2f) y = drawableHeight / 2f;
 
-            // 单独设置颜色
+            // 每帧单独设置颜色
             paint.setColor(colors.get(i));
+            // 绘制线条时加入 padding 上下留白
             canvas.drawLine(x, centerY - y, x, centerY + y, paint);
         }
     }
