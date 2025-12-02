@@ -4,9 +4,13 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.os.Handler;
-import android.os.HandlerThread;
+import android.os.Looper;
+import android.util.Log;
+
 
 public class AudioPlayer {
+
+    private static final String TAG = "AudioPlayer";
 
     public enum VoiceEffect {
         NORMAL,
@@ -20,17 +24,6 @@ public class AudioPlayer {
     private float pitchFactor = 1.0f;
     private VoiceEffect voiceEffect = VoiceEffect.NORMAL;
 
-    private final HandlerThread playThread;
-    private final Handler playHandler;
-
-    private AudioTrack currentTrack;
-
-    public AudioPlayer() {
-        playThread = new HandlerThread("AudioPlayThread");
-        playThread.start();
-        playHandler = new Handler(playThread.getLooper());
-    }
-
     public void setPitchFactor(float pitch) {
         this.pitchFactor = Math.max(0.5f, Math.min(2.0f, pitch));
     }
@@ -39,70 +32,31 @@ public class AudioPlayer {
         this.voiceEffect = effect;
     }
 
-    /** ----------------------------
-     * 立即播放（强制中断旧播放）
-     * ---------------------------- */
     public void playNow(short[] clip) {
-        stopCurrentPlayback();
-
-        playHandler.post(() -> playInternal(clip));
+        playInternal(clip, null);
+    }
+    public void playNow(short[] clip, Runnable onComplete) {
+        playInternal(clip, onComplete);
     }
 
-    /** 延迟播放（仍然可以被 playNow() 打断） */
     public void playDelayed(short[] clip, long delayMs) {
-        playHandler.postDelayed(() -> playNow(clip), delayMs);
+        new Handler(Looper.getMainLooper()).postDelayed(() -> playInternal(clip, null), delayMs);
     }
 
-    /** 循环播放（也会被 playNow() 打断） */
     public void playLoop(short[] clip, int loopCount) {
-        playHandler.post(() -> {
-            for (int i = 0; i < loopCount || loopCount == -1; i++) {
-                playNow(clip);
-
-                // 等待当前播放结束
-                synchronized (this) {
-                    if (currentTrack != null) {
-                        try { currentTrack.wait(); } catch (Exception ignored) {}
-                    }
-                }
+        new Thread(() -> {
+            int cnt = 0;
+            while (loopCount == -1 || cnt < loopCount) {
+                playInternal(clip, null);
+                cnt++;
             }
-        });
+        }).start();
     }
 
-    /** ----------------------------
-     * 停止当前播放
-     * ---------------------------- */
-    private synchronized void stopCurrentPlayback() {
-        if (currentTrack != null) {
-
-            try {
-                if (currentTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
-                    currentTrack.pause(); // 比 stop() 安全
-                }
-            } catch (Exception ignored) {}
-
-            try {
-                currentTrack.flush();
-                currentTrack.release();
-            } catch (Exception ignored) {}
-
-            currentTrack = null;
-        }
-
-        // ⚠ 不能 removeAllCallback，会删掉接下来要执行的 playInternal()
-        // 只清除延迟任务（不会影响立刻播放）
-        playHandler.removeMessages(0);
-    }
-
-    // ----------------------------
-    // 核心播放逻辑，不使用 sleep()
-    // ----------------------------
-    private void playInternal(short[] clip) {
-
+    private void playInternal(short[] clip, Runnable onComplete) {
         short[] processed = applyEffects(clip);
 
         int bufSize = processed.length * 2;
-
         AudioTrack track = new AudioTrack(
                 AudioManager.STREAM_MUSIC,
                 sampleRate,
@@ -112,117 +66,127 @@ public class AudioPlayer {
                 AudioTrack.MODE_STATIC
         );
 
-        synchronized (this) {
-            currentTrack = track;
-        }
-
         track.write(processed, 0, processed.length);
-
-        // ✔ 使用 marker 回调判断播放结束
+        // ---- 设置播放结束标记（单位：帧 = 采样点个数）----
         track.setNotificationMarkerPosition(processed.length);
+
+        // ---- 设置回调 ----
         track.setPlaybackPositionUpdateListener(new AudioTrack.OnPlaybackPositionUpdateListener() {
+            @Override public void onMarkerReached(AudioTrack track) {
+                // 播放完成
+                Log.d(TAG, "Playback completed.");
+                if (onComplete != null) onComplete.run();
 
-            @Override
-            public void onMarkerReached(AudioTrack audioTrack) {
-                synchronized (AudioPlayer.this) {
-                    if (currentTrack == track) {
-                        try { track.release(); } catch (Exception ignored) {}
-                        currentTrack = null;
-
-                        AudioPlayer.this.notifyAll();
-                    }
+                try {
+                    track.stop();
+                } catch (Exception ignored) {
                 }
+                track.release();
             }
 
-            @Override
-            public void onPeriodicNotification(AudioTrack audioTrack) {}
+            @Override public void onPeriodicNotification(AudioTrack track) {}
         });
-
         track.play();
     }
-
-    // ----------------------------
-    // 以下音效逻辑保持不变
-    // ----------------------------
 
     private short[] applyEffects(short[] pcm) {
         if (voiceEffect == VoiceEffect.NORMAL && pitchFactor == 1.0f) {
             return pcm;
         }
 
+        // Convert to float array
         float[] samples = new float[pcm.length];
-        for (int i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 32768f;
+        for (int i = 0; i < pcm.length; i++) {
+            samples[i] = pcm[i] / 32767.0f;
+        }
 
-        float curPitch = pitchFactor;
+        // Apply pitch shift first if needed
+        float currentPitch = pitchFactor;
         if (voiceEffect == VoiceEffect.ROBOT || voiceEffect == VoiceEffect.ROBOT_REVERB) {
-            curPitch = 1.5f;
+            currentPitch = 1.5f; // Robot voice uses fixed pitch
         }
 
-        if (curPitch != 1.0f) samples = applyPitchShift(samples, curPitch);
+        if (currentPitch != 1.0f) {
+            samples = applyPitchShift(samples, currentPitch);
+        }
 
-        if (voiceEffect == VoiceEffect.ROBOT || voiceEffect == VoiceEffect.ROBOT_REVERB)
+        // Apply other effects using TarsosDSP
+        if (voiceEffect == VoiceEffect.ROBOT || voiceEffect == VoiceEffect.ROBOT_REVERB) {
             samples = applyBitCrush(samples, 4);
+        }
 
-        if (voiceEffect == VoiceEffect.REVERB || voiceEffect == VoiceEffect.ROBOT_REVERB)
+        if (voiceEffect == VoiceEffect.REVERB || voiceEffect == VoiceEffect.ROBOT_REVERB) {
             samples = applyReverbSimple(samples);
+        }
 
-        short[] out = new short[samples.length];
+        // Convert back to short array
+        short[] output = new short[samples.length];
         for (int i = 0; i < samples.length; i++) {
-            float s = Math.max(-1f, Math.min(1f, samples[i]));
-            out[i] = (short) (s * 32767f);
+            float sample = Math.max(-1.0f, Math.min(1.0f, samples[i]));
+            output[i] = (short) (sample * 32767.0f);
         }
-        return out;
+
+        return output;
     }
 
-    private float[] applyPitchShift(float[] in, float pitch) {
-        if (pitch == 1.0f) return in;
+    // Simple pitch shift using resampling
+    private float[] applyPitchShift(float[] input, float pitchFactor) {
+        if (pitchFactor == 1.0f) return input;
 
-        int outLen = (int) (in.length / pitch);
-        float[] out = new float[outLen];
+        int outputLength = (int) (input.length / pitchFactor);
+        float[] output = new float[outputLength];
 
-        for (int i = 0; i < outLen; i++) {
-            float src = i * pitch;
-            int i0 = (int) src;
-            int i1 = Math.min(i0 + 1, in.length - 1);
-            float t = src - i0;
-            out[i] = in[i0] * (1 - t) + in[i1] * t;
+        for (int i = 0; i < outputLength; i++) {
+            float srcIndex = i * pitchFactor;
+            int idx0 = (int) srcIndex;
+            int idx1 = Math.min(idx0 + 1, input.length - 1);
+            float frac = srcIndex - idx0;
+            output[i] = input[idx0] * (1 - frac) + input[idx1] * frac;
         }
-        return out;
+
+        return output;
     }
 
-    private float[] applyBitCrush(float[] in, int bits) {
-        float[] out = new float[in.length];
-        float step = 2f / (1 << bits);
-        for (int i = 0; i < in.length; i++)
-            out[i] = Math.round(in[i] / step) * step;
-        return out;
+    // Bit crushing for robot voice
+    private float[] applyBitCrush(float[] input, int bits) {
+        float[] output = new float[input.length];
+        float step = 2.0f / (1 << bits);
+        for (int i = 0; i < input.length; i++) {
+            output[i] = Math.round(input[i] / step) * step;
+        }
+        return output;
     }
 
-    private float[] applyReverbSimple(float[] in) {
-        float[] out = new float[in.length];
-        int d1 = (int) (sampleRate * 0.03f);
-        int d2 = (int) (sampleRate * 0.05f);
-        int d3 = (int) (sampleRate * 0.07f);
-
+    // Simple reverb using delay lines
+    private float[] applyReverbSimple(float[] input) {
+        float[] output = new float[input.length];
+        int delay1 = (int) (sampleRate * 0.03f);
+        int delay2 = (int) (sampleRate * 0.05f);
+        int delay3 = (int) (sampleRate * 0.07f);
         float decay = 0.4f;
 
-        float[] dl1 = new float[d1], dl2 = new float[d2], dl3 = new float[d3];
-        int p1 = 0, p2 = 0, p3 = 0;
+        float[] delayLine1 = new float[delay1];
+        float[] delayLine2 = new float[delay2];
+        float[] delayLine3 = new float[delay3];
+        int pos1 = 0, pos2 = 0, pos3 = 0;
 
-        for (int i = 0; i < in.length; i++) {
-            float s = in[i];
-            s += dl1[p1] * decay;
-            s += dl2[p2] * decay * 0.7f;
-            s += dl3[p3] * decay * 0.5f;
+        for (int i = 0; i < input.length; i++) {
+            float sample = input[i];
+            sample += delayLine1[pos1] * decay;
+            sample += delayLine2[pos2] * decay * 0.7f;
+            sample += delayLine3[pos3] * decay * 0.5f;
 
-            dl1[p1] = dl2[p2] = dl3[p3] = s;
+            delayLine1[pos1] = sample;
+            delayLine2[pos2] = sample;
+            delayLine3[pos3] = sample;
 
-            p1 = (p1 + 1) % d1;
-            p2 = (p2 + 1) % d2;
-            p3 = (p3 + 1) % d3;
+            pos1 = (pos1 + 1) % delay1;
+            pos2 = (pos2 + 1) % delay2;
+            pos3 = (pos3 + 1) % delay3;
 
-            out[i] = s * 0.6f;
+            output[i] = sample * 0.6f;
         }
-        return out;
+
+        return output;
     }
 }

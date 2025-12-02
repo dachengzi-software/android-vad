@@ -6,16 +6,14 @@ import ai.onnxruntime.OrtException
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.OrtSession.SessionOptions
 import android.content.Context
+import android.util.Log
 import com.konovalov.vad.silero.config.FrameSize
 import com.konovalov.vad.silero.config.Mode
 import com.konovalov.vad.silero.config.SampleRate
 import com.konovalov.vad.silero.utils.AudioUtils.getFramesCount
 import com.konovalov.vad.silero.utils.AudioUtils.toFloatArray
-import com.konovalov.vad.silero.utils.TensorMap
 import java.io.Closeable
-import java.nio.FloatBuffer
 import java.nio.LongBuffer
-import kotlin.reflect.safeCast
 
 /**
  * Created by Georgiy Konovalov on 6/1/2023.
@@ -80,17 +78,32 @@ class VadSilero(
     )
         private set
 
+    companion object {
+        private const val TAG = "VadSilero"
+
+        private val SAMPLE_RATES = intArrayOf(8000, 16000)
+    }
+
     private val env: OrtEnvironment
     private val session: OrtSession
     private var isInitiated: Boolean = false
-
-    private var h = FloatArray(128)
-    private var c = FloatArray(128)
 
     private var speechFramesCount = 0
     private var silenceFramesCount = 0
     private var maxSpeechFramesCount = 0
     private var maxSilenceFramesCount = 0
+
+    private lateinit var state: Array<Array<FloatArray>>
+
+    private var context: Array<FloatArray> = arrayOf()
+
+    private var lastSr = 0
+    private var lastBatchSize = 0
+
+    private val windowSizeSamples: Int =
+        if (sampleRate == SampleRate.SAMPLE_RATE_16K) 512 else 256
+    private val contextSize: Int =
+        if (sampleRate == SampleRate.SAMPLE_RATE_16K) 64 else 32
 
     /**
      * Determines if the provided audio data contains speech based on the inference result.
@@ -162,65 +175,116 @@ class VadSilero(
      * The audio data is passed to the model for prediction. The result is extracted and compared
      * with the threshold value to determine if it represents speech.
      *
-     * @param audioData audio data to analyze.
+     * @param pcm audio data to analyze.
      * @return 'true' if speech is detected, 'false' otherwise.
      */
-    private fun predict(audioData: FloatArray): Boolean {
+    private fun predict(pcm: FloatArray): Boolean {
         checkState()
 
-        return createInputTensors(audioData).use { tensors ->
-            session.run(tensors).use { result ->
-                extractResult(result) > threshold()
+        var input = pcm
+
+        if (input.size < windowSizeSamples) {
+            val padded = FloatArray(windowSizeSamples)
+            System.arraycopy(input, 0, padded, 0, input.size)
+            input = padded
+        } else if (input.size > windowSizeSamples) {
+            val trimmed = FloatArray(windowSizeSamples)
+            System.arraycopy(input, 0, trimmed, 0, windowSizeSamples)
+            input = trimmed
+        }
+
+        val result = call(arrayOf(input), sampleRate.value)
+        val speechProbability = result[0]
+        val thresholdValue = threshold()
+        val isSpeechDetected = speechProbability > thresholdValue
+
+        Log.d(TAG, "VAD Result - Probability: $speechProbability, Threshold: $thresholdValue, IsSpeech: $isSpeechDetected, Mode: $mode")
+
+        return isSpeechDetected
+    }
+
+    /** Reset state using batch size = 1 */
+    fun resetStates() {
+        resetStates(1)
+    }
+
+    /** Reset with specific batch size */
+    private fun resetStates(batchSize: Int) {
+        state = Array(2) { Array(batchSize) { FloatArray(128) } }
+        context = arrayOf<FloatArray>()
+        lastSr = 0
+        lastBatchSize = 0
+    }
+
+    fun reset() {
+        resetStates()
+    }
+
+    /**
+     * Inner class for validation result
+     */
+    data class ValidationResult(
+        val x: Array<FloatArray>,
+        val sr: Int
+    )
+
+    /**
+     * Validate input data
+     *
+     * @param x Audio data array
+     * @param sr Sample rate
+     * @return Validated input data and sample rate
+     */
+    private fun validateInput(x: Array<FloatArray>, sr: Int): ValidationResult {
+        var xx = x
+        var sampleRate = sr
+
+        // Ensure input is at least 2D
+        if (xx.size == 1) {
+            xx = arrayOf(xx[0])
+        }
+
+        // Check if input dimension is valid
+        if (xx.size > 2) {
+            throw IllegalArgumentException("Incorrect audio data dimension: ${xx[0].size}")
+        }
+
+        // Downsample if sample rate is a multiple of 16000
+        if (sampleRate != 16000 && sampleRate % 16000 == 0) {
+            val step = sampleRate / 16000
+            val reducedX = Array(xx.size) { FloatArray(0) }
+
+            for (i in xx.indices) {
+                val current = xx[i]
+                val newArr = FloatArray((current.size + step - 1) / step)
+
+                var index = 0
+                var j = 0
+                while (j < current.size) {
+                    newArr[index++] = current[j]
+                    j += step
+                }
+
+                reducedX[i] = newArr
             }
+
+            xx = reducedX
+            sampleRate = 16000
         }
-    }
 
-    /**
-     * Retrieves and processes the output tensors to obtain the confidence value.
-     * The output tensor contains the confidence value, as well as the updated hidden state (H)
-     * and cell state (C) values. The H and C values are flattened and converted to float arrays
-     * for further processing.
-     *
-     * @param result output result of the inference session.
-     * @return confidence value.
-     */
-    private fun extractResult(result: OrtSession.Result): Float {
-        val confidence: Array<FloatArray>? = unpack(result, OutputTensors.OUTPUT)
-
-        flattenArray(unpack(result, OutputTensors.CN))?.let { c = it }
-        flattenArray(unpack(result, OutputTensors.HN))?.let { h = it }
-
-        return confidence?.getOrNull(0)?.getOrNull(0) ?: 0f
-    }
-
-    /**
-     * Unpacks the value of the specified tensor from an OrtSession.Result object
-     * and attempts to cast it to an array of the specified generic type {@code T}.
-     *
-     * @param output OrtSession.Result object from which to retrieve the value.
-     * @param index  specifying the position from which to retrieve the value.
-     * @param <T>    generic type to which the value should be cast.
-     * @return array of type {@code T} if the casting is successful,
-     *         or {@code null} if an exception occurs
-     *         or if the value cannot be cast to the specified type.
-     */
-    private inline fun <reified T> unpack(output: OrtSession.Result, index: Int): Array<T>? {
-        return try {
-            Array<T>::class.safeCast(output.get(index).value)
-        } catch (e: OrtException) {
-            null
+        // Validate sample rate
+        if (!SAMPLE_RATES.contains(sampleRate)) {
+            throw IllegalArgumentException(
+                "Only supports sample rates $SAMPLE_RATES (or multiples of 16000)"
+            )
         }
-    }
 
-    /**
-     * Flattens a multi-dimensional array of FloatArrays into a one-dimensional FloatArray.
-     *
-     * @param array multi-dimensional array to be flattened.
-     * @return flattened one-dimensional FloatArray if the input array is not null,
-     *         or {@code null} if the input array is null.
-     */
-    private fun flattenArray(array: Array<Array<FloatArray>>?): FloatArray? {
-        return array?.flatten()?.flatMap { it.asIterable() }?.toFloatArray()
+        // Check if audio chunk is too short
+        if (sampleRate.toFloat() / xx[0].size > 31.25f) {
+            throw IllegalArgumentException("Input audio is too short")
+        }
+
+        return ValidationResult(xx, sampleRate)
     }
 
     /**
@@ -233,28 +297,73 @@ class VadSilero(
      * @throws OrtException if there was an error in creating the tensors or getting the OrtEnvironment.
      * @return map of input tensors as a TensorMap<String, OnnxTensor>.
      */
-    private fun createInputTensors(audioData: FloatArray): TensorMap<String, OnnxTensor> {
-        return TensorMap<String, OnnxTensor>().apply {
-            InputTensors.INPUT to OnnxTensor.createTensor(
-                env,
-                FloatBuffer.wrap(audioData),
-                longArrayOf(1, frameSize.value.toLong())
+    private fun call(xParam: Array<FloatArray>, srParam: Int): FloatArray {
+        var x = xParam
+        var sr = srParam
+        val result: ValidationResult = validateInput(x, sr)
+        x = result.x
+        sr = result.sr
+
+        val batchSize = x.size
+        val numSamples = if (sr == 16000) 512 else 256
+        val contextSize = if (sr == 16000) 64 else 32
+
+        // Reset state if sample rate or batch changes
+        if (lastSr != 0 && lastSr != sr) {
+            resetStates(batchSize)
+        } else if (lastBatchSize != 0 && lastBatchSize != batchSize) {
+            resetStates(batchSize)
+        } else if (lastBatchSize == 0) {
+            lastBatchSize = batchSize
+        }
+
+        if (context.isEmpty()) {
+            context = Array(batchSize) { FloatArray(contextSize) }
+        }
+        // Combine context + new chunk
+        val xWithContext = Array(batchSize) { FloatArray(contextSize + numSamples) }
+        for (i in 0 until batchSize) {
+            // Copy context
+            System.arraycopy(context[i], 0, xWithContext[i], 0, contextSize)
+            // Copy input
+            System.arraycopy(x[i], 0, xWithContext[i], contextSize, numSamples)
+        }
+        var inputTensor: OnnxTensor? = null
+        var stateTensor: OnnxTensor? = null
+        var srTensor: OnnxTensor? = null
+        var ortOutputs: OrtSession.Result? = null
+
+        try {
+            inputTensor = OnnxTensor.createTensor(env, xWithContext)
+            stateTensor = OnnxTensor.createTensor(env, state)
+            srTensor = OnnxTensor.createTensor(env, longArrayOf(sr.toLong()))
+
+            val inputs = hashMapOf(
+                "input" to inputTensor, "sr" to srTensor, "state" to stateTensor
             )
-            InputTensors.SR to OnnxTensor.createTensor(
-                env,
-                LongBuffer.wrap(longArrayOf(sampleRate.value.toLong())),
-                longArrayOf(1)
-            )
-            InputTensors.H to OnnxTensor.createTensor(
-                env,
-                FloatBuffer.wrap(h),
-                longArrayOf(2, 1, 64)
-            )
-            InputTensors.C to OnnxTensor.createTensor(
-                env,
-                FloatBuffer.wrap(c),
-                longArrayOf(2, 1, 64)
-            )
+
+            ortOutputs = session.run(inputs)
+
+            val output = ortOutputs[0].value as Array<FloatArray>
+            state = ortOutputs[1].value as Array<Array<FloatArray>>
+
+            // Save last context
+            for (i in 0 until batchSize) {
+                System.arraycopy(
+                    xWithContext[i], xWithContext[i].size - contextSize, context[i], 0, contextSize
+                )
+            }
+
+            lastSr = sr
+            lastBatchSize = batchSize
+
+            return output[0]
+
+        } finally {
+            inputTensor?.close()
+            stateTensor?.close()
+            srTensor?.close()
+            ortOutputs?.close()
         }
     }
 
@@ -391,6 +500,7 @@ class VadSilero(
 
         session.close()
         env.close()
+        reset()
     }
 
     /**
@@ -408,8 +518,7 @@ class VadSilero(
     private object InputTensors {
         const val INPUT = "input"
         const val SR = "sr"
-        const val H = "h"
-        const val C = "c"
+        const val STATE = "state"
     }
 
     /**
@@ -444,6 +553,7 @@ class VadSilero(
 
         this.env = OrtEnvironment.getEnvironment()
         this.session = env.createSession(getModel(context), sessionOptions)
+        resetStates()
         this.isInitiated = true
     }
 }
