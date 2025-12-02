@@ -11,6 +11,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import androidx.fragment.app.Fragment
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.konovalov.vad.example.player.AudioPlayer
@@ -182,6 +183,13 @@ class VadSileroFragment : Fragment(), AudioCallback, View.OnClickListener,
                 if (segment.isNotEmpty()) {
                     // Pause detection before playback
                     pauseDetection = true
+                    val size = segment.size
+                    Log.d(TAG, "segment.size=${size}")
+                    requireActivity().runOnUiThread {
+                        Toast.makeText(
+                            requireContext(), "Detected speech, size=${size}", Toast.LENGTH_SHORT
+                        ).show()
+                    }
                     EXECUTOR.submit {
                         audioPlayer.playNow(segment, completeRunnable)
                     }
