@@ -13,7 +13,6 @@ import com.konovalov.vad.silero.config.SampleRate
 import com.konovalov.vad.silero.utils.AudioUtils.getFramesCount
 import com.konovalov.vad.silero.utils.AudioUtils.toFloatArray
 import java.io.Closeable
-import java.nio.LongBuffer
 
 /**
  * Created by Georgiy Konovalov on 6/1/2023.
@@ -235,27 +234,27 @@ class VadSilero(
      * @param sr Sample rate
      * @return Validated input data and sample rate
      */
-    private fun validateInput(x: Array<FloatArray>, sr: Int): ValidationResult {
-        var xx = x
-        var sampleRate = sr
+    private fun validateInput(xInput: Array<FloatArray>, srInput: Int): ValidationResult {
+        var x = xInput
+        var sr = srInput
 
         // Ensure input is at least 2D
-        if (xx.size == 1) {
-            xx = arrayOf(xx[0])
+        if (x.size == 1) {
+            x = arrayOf(x[0])
         }
 
         // Check if input dimension is valid
-        if (xx.size > 2) {
-            throw IllegalArgumentException("Incorrect audio data dimension: ${xx[0].size}")
+        if (x.size > 2) {
+            throw IllegalArgumentException("Incorrect audio data dimension: ${x[0].size}")
         }
 
         // Downsample if sample rate is a multiple of 16000
-        if (sampleRate != 16000 && sampleRate % 16000 == 0) {
-            val step = sampleRate / 16000
-            val reducedX = Array(xx.size) { FloatArray(0) }
+        if (sr != 16000 && sr % 16000 == 0) {
+            val step = sr / 16000
+            val reducedX = Array(x.size) { FloatArray(0) }
 
-            for (i in xx.indices) {
-                val current = xx[i]
+            for (i in x.indices) {
+                val current = x[i]
                 val newArr = FloatArray((current.size + step - 1) / step)
 
                 var index = 0
@@ -268,23 +267,23 @@ class VadSilero(
                 reducedX[i] = newArr
             }
 
-            xx = reducedX
-            sampleRate = 16000
+            x = reducedX
+            sr = 16000
         }
 
         // Validate sample rate
-        if (!SAMPLE_RATES.contains(sampleRate)) {
+        if (!SAMPLE_RATES.contains(sr)) {
             throw IllegalArgumentException(
                 "Only supports sample rates $SAMPLE_RATES (or multiples of 16000)"
             )
         }
 
         // Check if audio chunk is too short
-        if (sampleRate.toFloat() / xx[0].size > 31.25f) {
+        if (sr.toFloat() / x[0].size > 31.25f) {
             throw IllegalArgumentException("Input audio is too short")
         }
 
-        return ValidationResult(xx, sampleRate)
+        return ValidationResult(x, sr)
     }
 
     /**
@@ -297,12 +296,10 @@ class VadSilero(
      * @throws OrtException if there was an error in creating the tensors or getting the OrtEnvironment.
      * @return map of input tensors as a TensorMap<String, OnnxTensor>.
      */
-    private fun call(xParam: Array<FloatArray>, srParam: Int): FloatArray {
-        var x = xParam
-        var sr = srParam
-        val result: ValidationResult = validateInput(x, sr)
-        x = result.x
-        sr = result.sr
+    private fun call(xInput: Array<FloatArray>, srInput: Int): FloatArray {
+        val result = validateInput(xInput, srInput)
+        val x = result.x
+        val sr = result.sr
 
         val batchSize = x.size
         val numSamples = if (sr == 16000) 512 else 256
@@ -349,9 +346,8 @@ class VadSilero(
 
             // Save last context
             for (i in 0 until batchSize) {
-                System.arraycopy(
-                    xWithContext[i], xWithContext[i].size - contextSize, context[i], 0, contextSize
-                )
+                val row = xWithContext[i]
+                System.arraycopy(row, row.size - contextSize, context[i], 0, contextSize)
             }
 
             lastSr = sr
