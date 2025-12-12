@@ -180,24 +180,17 @@ class VadSilero(
     private fun predict(pcm: FloatArray): Boolean {
         checkState()
 
-        var input = pcm
+        // 自动 trim/pad 到固定长度windowSizeSamples
+        val input = pcm.copyOf(windowSizeSamples)
 
-        if (input.size < windowSizeSamples) {
-            val padded = FloatArray(windowSizeSamples)
-            System.arraycopy(input, 0, padded, 0, input.size)
-            input = padded
-        } else if (input.size > windowSizeSamples) {
-            val trimmed = FloatArray(windowSizeSamples)
-            System.arraycopy(input, 0, trimmed, 0, windowSizeSamples)
-            input = trimmed
-        }
-
-        val result = call(arrayOf(input), sampleRate.value)
-        val speechProbability = result[0]
+        val speechProbability = call(arrayOf(input), sampleRate.value)[0]
         val thresholdValue = threshold()
         val isSpeechDetected = speechProbability > thresholdValue
 
-        Log.d(TAG, "VAD Result - Probability: $speechProbability, Threshold: $thresholdValue, IsSpeech: $isSpeechDetected, Mode: $mode")
+        Log.d(
+            TAG,
+            "VAD Result - Probability: $speechProbability, Threshold: $thresholdValue, IsSpeech: $isSpeechDetected, Mode: $mode"
+        )
 
         return isSpeechDetected
     }
